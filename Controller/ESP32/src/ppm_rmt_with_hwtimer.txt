@@ -1,0 +1,318 @@
+#include <Arduino.h>
+#include <WiFi.h>
+#include <WiFiAP.h>
+#include <driver/rmt.h>
+#include <iterator>
+#include <vector>
+using namespace std;
+
+#define DIVIDER 8     /* Diviseur du timer*/
+#define DURATION 12.5 /* flash 80MHz => minimum time unit */
+
+#define GPIO_PIN 16
+
+#define PULSE_T0H ((625 * 4) / (DURATION * DIVIDER));
+#define PULSE_T1H ((1250 * 4) / (DURATION * DIVIDER));
+#define PULSE_T0L ((1045 * 4) / (DURATION * DIVIDER));
+#define PULSE_T1L ((420 * 4) / (DURATION * DIVIDER));
+
+#define PULSE_LOOOOOL ((1500 * 1000) / (DURATION * DIVIDER));
+
+const int lowPulse = 3009;
+#define SIZE 9
+
+void recvWithStartEndMarkers();
+void parseData();
+
+portMUX_TYPE timerMux0 = portMUX_INITIALIZER_UNLOCKED;
+// portMUX_TYPE timerMux1 = portMUX_INITIALIZER_UNLOCKED;
+
+unsigned long previousMicros = 0;
+const long interval = 22500;
+const long intervalDelay = 18000;
+unsigned long currentMicros = 0;
+
+vector<int> pulselengthsPPM = {15000, 12000, 10000, 10000, 10000, 11000, 12000, 13000};
+
+vector<int> defaultPulselengths = {10000, 15000, 15000, 15000, 10000, 10000, 10000, 10000};
+int pulselengthsPPM_copy[] = {1000, 1500, 1500, 1500, 1000, 1100, 1200, 1300};
+int values[] = {0, 0, 0, 0, 0, 0, 0, 0};
+
+rmt_config_t config;
+rmt_item32_t *Times_Array = (rmt_item32_t *)malloc(SIZE);
+
+uint16_t Throttle = 1000;
+volatile uint16_t throttle_copy = 1000;
+uint16_t Throttlecut = Throttle;
+uint8_t Decalcut = 0;
+byte Telem = 0;
+uint8_t Checksum = 0;
+uint16_t ThrottleTelem = 0;
+uint16_t DshotBinFrame = 0;
+
+long t_now = 0;
+volatile bool startRMT = false;
+bool rmtDone = false;
+unsigned long lastMillis = 0;
+const int chCount = 8;
+
+// ********** HW Timer ************
+hw_timer_t *syncTimer = NULL;
+int dividerCorrector = 40;
+
+// ********** Serial Receive *******
+static boolean recvInProgress = false;
+static byte ndx = 0;
+char startMarker = '<';
+char endMarker = '>';
+char rc;
+const byte numChars = 48;
+char receivedChars[numChars];
+char tempChars[numChars]; // temporary array for use when parsing
+// ******************************
+
+boolean newData = false;
+
+int calcDuration(int microSeconds)
+{
+    return (microSeconds / (DURATION * DIVIDER)) * 100;
+}
+
+void computePPM_RMT2()
+{
+    for (int i = 0; i < pulselengthsPPM.size(); i++)
+    {
+        Times_Array[i].duration0 = calcDuration(lowPulse);
+        Times_Array[i].level0 = 0;
+        Times_Array[i].duration1 = calcDuration(pulselengthsPPM.at(i) - lowPulse);
+        Times_Array[i].level1 = 1;
+    }
+
+    Times_Array[pulselengthsPPM.size()].duration0 = calcDuration(lowPulse);
+    Times_Array[pulselengthsPPM.size()].level0 = 0;
+    Times_Array[pulselengthsPPM.size()].duration1 = 0;
+    Times_Array[pulselengthsPPM.size()].level1 = 1;
+}
+
+void computePPM_RMT()
+{
+    for (int i = 0; i < 8; i++)
+    {
+        Times_Array[i].duration0 = calcDuration(lowPulse);
+        Times_Array[i].level0 = 0;
+        Times_Array[i].duration1 = calcDuration(1500 - lowPulse);
+        Times_Array[i].level1 = 1;
+    }
+
+    Times_Array[8].duration0 = 0;
+    Times_Array[8].level0 = 0;
+    Times_Array[8].duration1 = 0;
+    Times_Array[8].level1 = 1;
+}
+
+void IRAM_ATTR onSync()
+{
+    portENTER_CRITICAL_ISR(&timerMux0);
+    startRMT = true;
+    portEXIT_CRITICAL_ISR(&timerMux0);
+}
+
+void setupRMT()
+{
+    config.rmt_mode = RMT_MODE_TX;
+    config.channel = RMT_CHANNEL_0;
+    config.gpio_num = (gpio_num_t)GPIO_PIN;
+    config.mem_block_num = 1;
+    config.tx_config.loop_en = 0;
+    config.tx_config.carrier_en = 0;
+    config.tx_config.idle_output_en = 1;
+    config.tx_config.idle_level = RMT_IDLE_LEVEL_HIGH;
+    config.clk_div = DIVIDER;
+
+    ESP_ERROR_CHECK(rmt_config(&config));
+    ESP_ERROR_CHECK(rmt_driver_install(config.channel, 0, 0));
+}
+
+// void start_rmt(void *pvParameter)
+// {
+//     config.rmt_mode = RMT_MODE_TX;
+//     config.channel = RMT_CHANNEL_0;
+//     config.gpio_num = (gpio_num_t)GPIO_PIN;
+//     config.mem_block_num = 1;
+//     config.tx_config.loop_en = 0;
+//     config.tx_config.carrier_en = 0;
+//     config.tx_config.idle_output_en = 1;
+//     config.tx_config.idle_level = RMT_IDLE_LEVEL_HIGH;
+//     config.clk_div = DIVIDER;
+
+//     rmt_config(&config);
+//     rmt_driver_install(config.channel, 0, 0);
+
+//     while (1)
+//     {
+
+//         currentMicros = micros();
+
+//         if (currentMicros - previousMicros >= interval)
+//         {
+
+//             // portENTER_CRITICAL_ISR(&timerMux0);
+//             // // std::copy(std::begin(pulselengthsPPM), std::end(pulselengthsPPM), std::begin(pulselengthsPPM_copy));
+//             // portEXIT_CRITICAL_ISR(&timerMux0);
+
+//             computePPM_RMT();
+
+//             previousMicros = currentMicros;
+
+//             rmt_write_items(RMT_CHANNEL_0, Times_Array, SIZE, false);
+//             rmt_wait_tx_done(config.channel, portMAX_DELAY);
+
+//             rmtDone = true;
+//         }
+//         // if (currentMicros - previousMicros >= intervalDelay)
+//         // {
+//         //     delay(2);
+//         // }
+//     }
+// }
+
+void setup()
+{
+    Serial.begin(115200);
+    pinMode(GPIO_PIN, OUTPUT);
+    setupRMT();
+    computePPM_RMT();
+    // xTaskCreate(&start_rmt, "rmt_task", 2048, NULL, 5, NULL);
+
+    syncTimer = timerBegin(2, 2, true);
+    timerAttachInterrupt(syncTimer, &onSync, true);
+    timerAlarmWrite(syncTimer, interval * dividerCorrector, true);
+    timerAlarmEnable(syncTimer);
+}
+
+void getSerialData()
+{
+
+    recvWithStartEndMarkers();
+    if (newData == true)
+    {
+
+        strcpy(tempChars, receivedChars);
+        // this temporary copy is necessary to protect the original data
+        //   because strtok() used in parseData() replaces the commas with \0
+        parseData();
+        newData = false;
+
+        for (int q = 0; q < chCount; q++)
+        {
+            pulselengthsPPM[q] = values[q];
+        }
+
+        lastMillis = millis();
+
+        //delay(5);
+    }
+}
+
+void loop()
+{
+
+    portENTER_CRITICAL_ISR(&timerMux0);
+    if (startRMT)
+    {
+        // digitalWrite(GPIO_PIN, 0);
+
+        computePPM_RMT();
+        // digitalWrite(GPIO_PIN, 1);
+
+        rmt_write_items(RMT_CHANNEL_0, Times_Array, SIZE, true);
+        rmt_wait_tx_done(config.channel, portMAX_DELAY);
+        // getSerialData();
+        startRMT = false;
+    }
+    // if (rmtDone)
+    // {
+    //     // digitalWrite(GPIO_PIN, 0);
+
+    //     getSerialData();
+
+    //     rmtDone = false;
+
+    //     // digitalWrite(GPIO_PIN, 1);
+    // }
+
+    // if (millis() - lastMillis > 250)
+    // {
+    //     for (int q = 0; q < chCount; q++)
+    //     {
+    //         pulselengthsPPM.at(q) = defaultPulselengths.at(q);
+    //     }
+    // }
+    portEXIT_CRITICAL_ISR(&timerMux0);
+}
+
+void recvWithStartEndMarkers()
+{
+
+    while (Serial.available() > 0 && newData == false)
+    {
+        rc = Serial.read();
+
+        if (recvInProgress == true)
+        {
+            if (rc != endMarker)
+            {
+                receivedChars[ndx] = rc;
+                ndx++;
+                if (ndx >= numChars)
+                {
+                    ndx = numChars - 1;
+                }
+            }
+            else
+            {
+                receivedChars[ndx] = '\0'; // terminate the string
+                recvInProgress = false;
+                ndx = 0;
+                newData = true;
+            }
+        }
+
+        else if (rc == startMarker)
+        {
+            recvInProgress = true;
+        }
+    }
+}
+
+//============
+
+void parseData()
+{ // split the data into its parts
+
+    char *strtokIndx; // this is used by strtok() as an index
+
+    strtokIndx = strtok(tempChars, ","); // get the first part - the string
+    values[0] = atoi(strtokIndx);
+
+    strtokIndx = strtok(NULL, ","); // this continues where the previous call left off
+    values[1] = atoi(strtokIndx);   // convert this part to an integer
+
+    strtokIndx = strtok(NULL, ",");
+    values[2] = atoi(strtokIndx); // convert this part to a float
+
+    strtokIndx = strtok(NULL, ",");
+    values[3] = atoi(strtokIndx); // convert this part to a float
+
+    strtokIndx = strtok(NULL, ",");
+    values[4] = atoi(strtokIndx); // convert this part to a float
+
+    strtokIndx = strtok(NULL, ",");
+    values[5] = atoi(strtokIndx); // convert this part to a float
+
+    strtokIndx = strtok(NULL, ",");
+    values[6] = atoi(strtokIndx); // convert this part to a float
+
+    strtokIndx = strtok(NULL, ",");
+    values[7] = atoi(strtokIndx); // convert this part to a float
+}

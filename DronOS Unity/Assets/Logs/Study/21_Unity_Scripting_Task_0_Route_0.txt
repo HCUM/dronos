@@ -1,0 +1,7 @@
+Condition: Unity_Scripting
+User Waypoints: 
+0, 1, 0
+0, 1, 1
+
+
+

@@ -1,0 +1,6 @@
+Condition: Vive_Realtime
+User Waypoints: 
+-0.9409909, 0.5211793, -1.140249
+
+
+

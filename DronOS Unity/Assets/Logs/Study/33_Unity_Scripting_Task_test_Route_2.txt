@@ -1,0 +1,11 @@
+Condition: Unity_Scripting
+User Waypoints: 
+0, 0.8, 0
+
+
+01.12.2018, 13:27:49:374, Parked
+
+01.12.2018, 13:27:52:483, Takeoff, -1.374, 0.07, -1.25, -1.374, 0.07, -1.25, 0, 0, 0, 0, 0, 0, Tracking is fine
+
+
+

@@ -1,0 +1,12 @@
+Condition: Unity_Scripting
+User Waypoints: 
+0, 1, 0
+0, 1, 1
+0, 0, 0
+
+
+28.11.2018, 10:45:35:986, Parked
+
+
+
+
